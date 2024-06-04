@@ -129,6 +129,7 @@ def getdtype(dtype, a=None, default=None):
             raise ValueError(
                 "object dtype is not supported by sparse matrices"
             )
+        
     if newdtype not in supported_dtypes:
         raise ValueError("given datatype is not supported")
 
