@@ -48,8 +48,8 @@ import scipy.special as special
 from scipy import linalg  # noqa: F401
 from . import distributions
 from . import _mstats_basic as mstats_basic
-from ._stats_mstats_common import (_find_repeats, linregress, theilslopes,
-                                   siegelslopes)
+
+from ._stats_mstats_common import _find_repeats, theilslopes, siegelslopes
 from ._stats import _kendall_dis, _toint64, _weightedrankedtau
 
 from dataclasses import dataclass, field
@@ -59,8 +59,8 @@ from ._resampling import (MonteCarloMethod, PermutationMethod, BootstrapMethod,
                           monte_carlo_test, permutation_test, bootstrap,
                           _batch_generator)
 from ._axis_nan_policy import (_axis_nan_policy_factory,
-                               _broadcast_concatenate,
-                               _broadcast_shapes)
+                               _broadcast_concatenate, _broadcast_shapes,
+                               _broadcast_array_shapes_remove_axis, SmallSampleWarning)
 from ._binomtest import _binary_search_for_binom_tst as _binary_search
 from scipy._lib._bunch import _make_tuple_bunch
 from scipy import stats
@@ -443,7 +443,7 @@ def _mode_result(mode, count):
     # but `count` should not be NaN; it should be zero.
     i = np.isnan(count)
     if i.shape == ():
-        count = count.dtype(0) if i else count
+        count = np.asarray(0, dtype=count.dtype)[()] if i else count
     else:
         count[i] = 0
     return ModeResult(mode, count)
@@ -1459,7 +1459,7 @@ def skewtest(a, axis=0, nan_policy='propagate', alternative='two-sided'):
     Parameters
     ----------
     a : array
-        The data to be tested.
+        The data to be tested. Must contain at least eight observations.
     axis : int or None, optional
        Axis along which statistics are calculated. Default is 0.
        If None, compute over the whole array `a`.
@@ -1611,12 +1611,13 @@ def skewtest(a, axis=0, nan_policy='propagate', alternative='two-sided'):
     xp = array_namespace(a)
     a, axis = _chk_asarray(a, axis, xp=xp)
 
-    b2 = skew(a, axis)
+    b2 = skew(a, axis, _no_deco=True)
     n = a.shape[axis]
     if n < 8:
         message = ("`skewtest` requires at least 8 observations; "
-                   f"{n} observations were given.")
+                   f"only {n=} observations were given.")
         raise ValueError(message)
+
     y = b2 * math.sqrt(((n + 1) * (n + 3)) / (6.0 * (n - 2)))
     beta2 = (3.0 * (n**2 + 27*n - 70) * (n+1) * (n+3) /
              ((n-2.0) * (n+5) * (n+7) * (n+9)))
@@ -1647,7 +1648,7 @@ def kurtosistest(a, axis=0, nan_policy='propagate', alternative='two-sided'):
     Parameters
     ----------
     a : array
-        Array of the sample data.
+        Array of the sample data. Must contain at least five observations.
     axis : int or None, optional
        Axis along which to compute test. Default is 0. If None,
        compute over the whole array `a`.
@@ -1814,7 +1815,7 @@ def kurtosistest(a, axis=0, nan_policy='propagate', alternative='two-sided'):
         message = ("`kurtosistest` p-value may be inaccurate with fewer than 20 "
                    f"observations; only {n=} observations were given.")
         warnings.warn(message, stacklevel=2)
-    b2 = kurtosis(a, axis, fisher=False)
+    b2 = kurtosis(a, axis, fisher=False, _no_deco=True)
 
     E = 3.0*(n-1) / (n+1)
     varb2 = 24.0*n*(n-2)*(n-3) / ((n+1)*(n+1.)*(n+3)*(n+5))  # [1]_ Eq. 1
@@ -1858,7 +1859,8 @@ def normaltest(a, axis=0, nan_policy='propagate'):
     Parameters
     ----------
     a : array_like
-        The array containing the sample to be tested.
+        The array containing the sample to be tested. Must contain
+        at least eight observations.
     axis : int or None, optional
         Axis along which to compute test. Default is 0. If None,
         compute over the whole array `a`.
@@ -1997,8 +1999,8 @@ def normaltest(a, axis=0, nan_policy='propagate'):
     """
     xp = array_namespace(a)
 
-    s, _ = skewtest(a, axis)
-    k, _ = kurtosistest(a, axis)
+    s, _ = skewtest(a, axis, _no_deco=True)
+    k, _ = kurtosistest(a, axis, _no_deco=True)
     statistic = s*s + k*k
 
     chi2 = _SimpleChi2(xp.asarray(2.))
@@ -2807,7 +2809,7 @@ def sem(a, axis=0, ddof=1, nan_policy='propagate'):
     ----------
     a : array_like
         An array containing the values for which the standard error is
-        returned.
+        returned. Must contain at least two observations.
     axis : int or None, optional
         Axis along which to operate. Default is 0. If None, compute over
         the whole array `a`.
@@ -3963,26 +3965,27 @@ def _first(arr, axis):
 
 
 def _f_oneway_is_too_small(samples, kwargs={}, axis=-1):
+    message = f"At least two samples are required; got {len(samples)}."
+    if len(samples) < 2:
+        raise TypeError(message)
+
     # Check this after forming alldata, so shape errors are detected
     # and reported before checking for 0 length inputs.
     if any(sample.shape[axis] == 0 for sample in samples):
-        msg = 'at least one input has length 0'
-        warnings.warn(stats.DegenerateDataWarning(msg), stacklevel=2)
         return True
 
     # Must have at least one group with length greater than 1.
     if all(sample.shape[axis] == 1 for sample in samples):
         msg = ('all input arrays have length 1.  f_oneway requires that at '
                'least one input has length greater than 1.')
-        warnings.warn(stats.DegenerateDataWarning(msg), stacklevel=2)
+        warnings.warn(SmallSampleWarning(msg), stacklevel=2)
         return True
 
     return False
 
 
 @_axis_nan_policy_factory(
-    F_onewayResult, n_samples=None, too_small=_f_oneway_is_too_small
-)
+    F_onewayResult, n_samples=None, too_small=_f_oneway_is_too_small)
 def f_oneway(*samples, axis=0):
     """Perform one-way ANOVA.
 
@@ -4010,12 +4013,12 @@ def f_oneway(*samples, axis=0):
     Warns
     -----
     `~scipy.stats.ConstantInputWarning`
-        Raised if all values within each of the input arrays are identical.
+        Emitted if all values within each of the input arrays are identical.
         In this case the F statistic is either infinite or isn't defined,
         so ``np.inf`` or ``np.nan`` is returned.
 
-    `~scipy.stats.DegenerateDataWarning`
-        Raised if the length of any input array is 0, or if all the input
+    RuntimeWarning
+        Emitted if the length of any input array is 0, or if all the input
         arrays have length 1.  ``np.nan`` is returned for the F statistic
         and the p-value in these cases.
 
@@ -4228,7 +4231,7 @@ def alexandergovern(*samples, nan_policy='propagate'):
     ----------
     sample1, sample2, ... : array_like
         The sample measurements for each group.  There must be at least
-        two samples.
+        two samples, and each sample must contain at least two observations.
     nan_policy : {'propagate', 'raise', 'omit'}, optional
         Defines how to handle when input contains nan.
         The following options are available (default is 'propagate'):
@@ -4916,11 +4919,9 @@ def pearsonr(x, y, *, alternative='two-sided', method=None, axis=0):
 
     # As explained in the docstring, the distribution of `r` under the null
     # hypothesis is the beta distribution on (-1, 1) with a = b = n/2 - 1.
-    # This needs to be done with NumPy arrays given the existing infrastructure.
-    ab = n/2 - 1
-    dist = stats.beta(ab, ab, loc=-1, scale=2)
-    pvalue = _get_pvalue(np.asarray(r), dist, alternative, xp=np)
-    pvalue = xp.asarray(pvalue, dtype=dtype)
+    ab = xp.asarray(n/2 - 1)
+    dist = _SimpleBeta(ab, ab, loc=-1, scale=2)
+    pvalue = _get_pvalue(r, dist, alternative, xp=xp)
 
     r = r[()] if r.ndim == 0 else r
     pvalue = pvalue[()] if pvalue.ndim == 0 else pvalue
@@ -5539,7 +5540,8 @@ def spearmanr(a, b=None, axis=0, nan_policy='propagate',
         # errors before taking the square root
         t = rs * np.sqrt((dof/((rs+1.0)*(1.0-rs))).clip(0))
 
-    prob = _get_pvalue(t, distributions.t(dof), alternative, xp=np)
+    dist = _SimpleStudentT(dof)
+    prob = _get_pvalue(t, dist, alternative, xp=np)
 
     # For backwards compatibility, return scalars when comparing 2 columns
     if rs.shape == (2, 2):
@@ -6276,8 +6278,7 @@ def unpack_TtestResult(res):
                           result_to_tuple=unpack_TtestResult, n_outputs=6)
 # nan_policy handled by `_axis_nan_policy`, but needs to be left
 # in signature to preserve use as a positional argument
-def ttest_1samp(a, popmean, axis=0, nan_policy='propagate',
-                alternative="two-sided"):
+def ttest_1samp(a, popmean, axis=0, nan_policy="propagate", alternative="two-sided"):
     """Calculate the T-test for the mean of ONE group of scores.
 
     This is a test for the null hypothesis that the expected value
@@ -6437,6 +6438,13 @@ def ttest_1samp(a, popmean, axis=0, nan_policy='propagate',
     n = a.shape[axis]
     df = n - 1
 
+    if n == 0:
+        # This is really only needed for *testing* _axis_nan_policy decorator
+        # It won't happen when the decorator is used.
+        NaN = _get_nan(a)
+        return TtestResult(NaN, NaN, df=NaN, alternative=NaN,
+                           standard_error=NaN, estimate=NaN)
+
     mean = xp.mean(a, axis=axis)
     try:
         popmean = xp.asarray(popmean)
@@ -6450,12 +6458,9 @@ def ttest_1samp(a, popmean, axis=0, nan_policy='propagate',
     with np.errstate(divide='ignore', invalid='ignore'):
         t = xp.divide(d, denom)
         t = t[()] if t.ndim == 0 else t
-    # This will only work for CPU backends for now. That's OK. In time,
-    # `from_dlpack` will enable the transfer from other devices, and
-    # `_get_pvalue` will even be reworked to support the native backend.
-    t_np = np.asarray(t)
-    prob = _get_pvalue(t_np, distributions.t(df), alternative, xp=np)
-    prob = xp.asarray(prob, dtype=t.dtype)
+
+    dist = _SimpleStudentT(xp.asarray(df, dtype=t.dtype))
+    prob = _get_pvalue(t, dist, alternative, xp=xp)
     prob = prob[()] if prob.ndim == 0 else prob
 
     # when nan_policy='omit', `df` can be different for different axis-slices
@@ -6465,7 +6470,7 @@ def ttest_1samp(a, popmean, axis=0, nan_policy='propagate',
     alternative_num = {"less": -1, "two-sided": 0, "greater": 1}[alternative]
     return TtestResult(t, prob, df=df, alternative=alternative_num,
                        standard_error=denom, estimate=mean,
-                       statistic_np=t_np, xp=xp)
+                       statistic_np=xp.asarray(t), xp=xp)
 
 
 def _t_confidence_interval(df, t, confidence_level, alternative, dtype=None, xp=None):
@@ -6500,17 +6505,26 @@ def _t_confidence_interval(df, t, confidence_level, alternative, dtype=None, xp=
     high = high[()] if high.ndim == 0 else high
     return low, high
 
-def _ttest_ind_from_stats(mean1, mean2, denom, df, alternative):
+
+def _ttest_ind_from_stats(mean1, mean2, denom, df, alternative, xp=None):
+    xp = array_namespace(mean1, mean2, denom) if xp is None else xp
 
     d = mean1 - mean2
     with np.errstate(divide='ignore', invalid='ignore'):
-        t = np.divide(d, denom)[()]
-    prob = _get_pvalue(t, distributions.t(df), alternative, xp=np)
+        t = xp.divide(d, denom)
 
-    return (t, prob)
+    t_np = np.asarray(t)
+    df_np = np.asarray(df)
+    prob = _get_pvalue(t_np, distributions.t(df_np), alternative, xp=np)
+    prob = xp.asarray(prob, dtype=t.dtype)
+
+    t = t[()] if t.ndim == 0 else t
+    prob = prob[()] if prob.ndim == 0 else prob
+    return t, prob
 
 
-def _unequal_var_ttest_denom(v1, n1, v2, n2):
+def _unequal_var_ttest_denom(v1, n1, v2, n2, xp=None):
+    xp = array_namespace(v1, v2) if xp is None else xp
     vn1 = v1 / n1
     vn2 = v2 / n2
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -6518,23 +6532,26 @@ def _unequal_var_ttest_denom(v1, n1, v2, n2):
 
     # If df is undefined, variances are zero (assumes n1 > 0 & n2 > 0).
     # Hence it doesn't matter what df is as long as it's not NaN.
-    df = np.where(np.isnan(df), 1, df)
-    denom = np.sqrt(vn1 + vn2)
+    df = xp.where(xp.isnan(df), xp.asarray(1.), df)
+    denom = xp.sqrt(vn1 + vn2)
     return df, denom
 
 
-def _equal_var_ttest_denom(v1, n1, v2, n2):
+def _equal_var_ttest_denom(v1, n1, v2, n2, xp=None):
+    xp = array_namespace(v1, v2) if xp is None else xp
+
     # If there is a single observation in one sample, this formula for pooled
     # variance breaks down because the variance of that sample is undefined.
     # The pooled variance is still defined, though, because the (n-1) in the
     # numerator should cancel with the (n-1) in the denominator, leaving only
     # the sum of squared differences from the mean: zero.
-    v1 = np.where(n1 == 1, 0, v1)[()]
-    v2 = np.where(n2 == 1, 0, v2)[()]
+    zero = xp.asarray(0.)
+    v1 = xp.where(xp.asarray(n1 == 1), zero, v1)
+    v2 = xp.where(xp.asarray(n2 == 1), zero, v2)
 
     df = n1 + n2 - 2.0
     svar = ((n1 - 1) * v1 + (n2 - 1) * v2) / df
-    denom = np.sqrt(svar * (1.0 / n1 + 1.0 / n2))
+    denom = xp.sqrt(svar * (1.0 / n1 + 1.0 / n2))
     return df, denom
 
 
@@ -6663,15 +6680,17 @@ def ttest_ind_from_stats(mean1, std1, nobs1, mean2, std2, nobs2,
     Ttest_indResult(statistic=-0.5627179589855622, pvalue=0.573989277115258)
 
     """
-    mean1 = np.asarray(mean1)
-    std1 = np.asarray(std1)
-    mean2 = np.asarray(mean2)
-    std2 = np.asarray(std2)
+    xp = array_namespace(mean1, std1, mean2, std2)
+
+    mean1 = xp.asarray(mean1)
+    std1 = xp.asarray(std1)
+    mean2 = xp.asarray(mean2)
+    std2 = xp.asarray(std2)
+
     if equal_var:
-        df, denom = _equal_var_ttest_denom(std1**2, nobs1, std2**2, nobs2)
+        df, denom = _equal_var_ttest_denom(std1**2, nobs1, std2**2, nobs2, xp=xp)
     else:
-        df, denom = _unequal_var_ttest_denom(std1**2, nobs1,
-                                             std2**2, nobs2)
+        df, denom = _unequal_var_ttest_denom(std1**2, nobs1, std2**2, nobs2, xp=xp)
 
     res = _ttest_ind_from_stats(mean1, mean2, denom, df, alternative)
     return Ttest_indResult(*res)
@@ -6926,23 +6945,35 @@ def ttest_ind(a, b, axis=0, equal_var=True, nan_policy='propagate',
     Ttest_indResult(statistic=3.4463884028073513,
                     pvalue=0.01369338726499547)
     """
+    xp = array_namespace(a, b)
+
+    default_float = xp.asarray(1.).dtype
+    if xp.isdtype(a.dtype, 'integral'):
+        a = xp.astype(a, default_float)
+    if xp.isdtype(b.dtype, 'integral'):
+        b = xp.astype(b, default_float)
+
     if not (0 <= trim < .5):
         raise ValueError("Trimming percentage should be 0 <= `trim` < .5.")
 
-    NaN = _get_nan(a, b)
-
-    if a.size == 0 or b.size == 0:
-        # _axis_nan_policy decorator ensures this only happens with 1d input
+    result_shape = _broadcast_array_shapes_remove_axis((a, b), axis=axis)
+    NaN = xp.full(result_shape, _get_nan(a, b, xp=xp))
+    NaN = NaN[()] if NaN.ndim == 0 else NaN
+    if xp_size(a) == 0 or xp_size(b) == 0:
         return TtestResult(NaN, NaN, df=NaN, alternative=NaN,
                            standard_error=NaN, estimate=NaN)
 
+    alternative_nums = {"less": -1, "two-sided": 0, "greater": 1}
+
+    # This probably should be deprecated and replaced with a `method` argument
     if permutations is not None and permutations != 0:
+        message = "Use of `permutations` is compatible only with NumPy arrays."
+        if not is_numpy(xp):
+            raise NotImplementedError(message)
+
+        message = "Use of `permutations` is incompatible with with use of `trim`."
         if trim != 0:
-            raise ValueError("Permutations are currently not supported "
-                             "with trimming.")
-        if permutations < 0 or (np.isfinite(permutations) and
-                                int(permutations) != permutations):
-            raise ValueError("Permutations must be a non-negative integer.")
+            raise NotImplementedError(message)
 
         t, prob = _permutation_ttest(a, b, permutations=permutations,
                                      axis=axis, equal_var=equal_var,
@@ -6951,37 +6982,40 @@ def ttest_ind(a, b, axis=0, equal_var=True, nan_policy='propagate',
                                      alternative=alternative)
         df, denom, estimate = NaN, NaN, NaN
 
+        # _axis_nan_policy decorator doesn't play well with strings
+        return TtestResult(t, prob, df=df, alternative=alternative_nums[alternative],
+                           standard_error=denom, estimate=estimate)
+
+    n1 = xp.asarray(a.shape[axis], dtype=a.dtype)
+    n2 = xp.asarray(b.shape[axis], dtype=b.dtype)
+
+    if trim == 0:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            v1 = _var(a, axis, ddof=1, xp=xp)
+            v2 = _var(b, axis, ddof=1, xp=xp)
+
+        m1 = xp.mean(a, axis=axis)
+        m2 = xp.mean(b, axis=axis)
     else:
-        n1 = a.shape[axis]
-        n2 = b.shape[axis]
+        message = "Use of `trim` is compatible only with NumPy arrays."
+        if not is_numpy(xp):
+            raise NotImplementedError(message)
 
-        if trim == 0:
-            if equal_var:
-                old_errstate = np.geterr()
-                np.seterr(divide='ignore', invalid='ignore')
-            v1 = _var(a, axis, ddof=1)
-            v2 = _var(b, axis, ddof=1)
-            if equal_var:
-                np.seterr(**old_errstate)
-            m1 = np.mean(a, axis)
-            m2 = np.mean(b, axis)
-        else:
-            v1, m1, n1 = _ttest_trim_var_mean_len(a, trim, axis)
-            v2, m2, n2 = _ttest_trim_var_mean_len(b, trim, axis)
+        v1, m1, n1 = _ttest_trim_var_mean_len(a, trim, axis)
+        v2, m2, n2 = _ttest_trim_var_mean_len(b, trim, axis)
 
-        if equal_var:
-            df, denom = _equal_var_ttest_denom(v1, n1, v2, n2)
-        else:
-            df, denom = _unequal_var_ttest_denom(v1, n1, v2, n2)
-        t, prob = _ttest_ind_from_stats(m1, m2, denom, df, alternative)
+    if equal_var:
+        df, denom = _equal_var_ttest_denom(v1, n1, v2, n2, xp=xp)
+    else:
+        df, denom = _unequal_var_ttest_denom(v1, n1, v2, n2, xp=xp)
+    t, prob = _ttest_ind_from_stats(m1, m2, denom, df, alternative)
 
-        # when nan_policy='omit', `df` can be different for different axis-slices
-        df = np.broadcast_to(df, t.shape)[()]
-        estimate = m1-m2
+    # when nan_policy='omit', `df` can be different for different axis-slices
+    df = xp.broadcast_to(df, t.shape)
+    df = df[()] if df.ndim ==0 else df
+    estimate = m1 - m2
 
-    # _axis_nan_policy decorator doesn't play well with strings
-    alternative_num = {"less": -1, "two-sided": 0, "greater": 1}[alternative]
-    return TtestResult(t, prob, df=df, alternative=alternative_num,
+    return TtestResult(t, prob, df=df, alternative=alternative_nums[alternative],
                        standard_error=denom, estimate=estimate)
 
 
@@ -7092,9 +7126,9 @@ def _calc_t_stat(a, b, equal_var, axis=-1):
     var_b = _var(b, axis=axis, ddof=1)
 
     if not equal_var:
-        denom = _unequal_var_ttest_denom(var_a, na, var_b, nb)[1]
+        _, denom = _unequal_var_ttest_denom(var_a, na, var_b, nb)
     else:
-        denom = _equal_var_ttest_denom(var_a, na, var_b, nb)[1]
+        _, denom = _equal_var_ttest_denom(var_a, na, var_b, nb)
 
     return (avg_a-avg_b)/denom
 
@@ -7140,6 +7174,10 @@ def _permutation_ttest(a, b, permutations, axis=0, equal_var=True,
         The p-value.
 
     """
+    if permutations < 0 or (np.isfinite(permutations) and
+                            int(permutations) != permutations):
+        raise ValueError("Permutations must be a non-negative integer.")
+
     random_state = check_random_state(random_state)
 
     t_stat_observed = _calc_t_stat(a, b, equal_var, axis=axis)
@@ -7284,38 +7322,8 @@ def ttest_rel(a, b, axis=0, nan_policy='propagate', alternative="two-sided"):
     TtestResult(statistic=-5.879467544540889, pvalue=7.540777129099917e-09, df=499)
 
     """
-    a, b, axis = _chk2_asarray(a, b, axis)
-
-    na = _get_len(a, axis, "first argument")
-    nb = _get_len(b, axis, "second argument")
-    if na != nb:
-        raise ValueError('unequal length arrays')
-
-    if na == 0 or nb == 0:
-        # _axis_nan_policy decorator ensures this only happens with 1d input
-        NaN = _get_nan(a, b)
-        return TtestResult(NaN, NaN, df=NaN, alternative=NaN,
-                           standard_error=NaN, estimate=NaN)
-
-    n = a.shape[axis]
-    df = n - 1
-
-    d = (a - b).astype(np.float64)
-    v = _var(d, axis, ddof=1)
-    dm = np.mean(d, axis)
-    denom = np.sqrt(v / n)
-
-    with np.errstate(divide='ignore', invalid='ignore'):
-        t = np.divide(dm, denom)[()]
-    prob = _get_pvalue(t, distributions.t(df), alternative, xp=np)
-
-    # when nan_policy='omit', `df` can be different for different axis-slices
-    df = np.broadcast_to(df, t.shape)[()]
-
-    # _axis_nan_policy decorator doesn't play well with strings
-    alternative_num = {"less": -1, "two-sided": 0, "greater": 1}[alternative]
-    return TtestResult(t, prob, df=df, alternative=alternative_num,
-                       standard_error=denom, estimate=dm)
+    return ttest_1samp(a - b, popmean=0, axis=axis, alternative=alternative,
+                       _no_deco=True)
 
 
 # Map from names to lambda_ values used in power_divergence().
@@ -8863,32 +8871,7 @@ def kruskal(*samples, nan_policy='propagate'):
     if num_groups < 2:
         raise ValueError("Need at least two groups in stats.kruskal()")
 
-    for sample in samples:
-        if sample.size == 0:
-            NaN = _get_nan(*samples)
-            return KruskalResult(NaN, NaN)
-        elif sample.ndim != 1:
-            raise ValueError("Samples must be one-dimensional.")
-
     n = np.asarray(list(map(len, samples)))
-
-    if nan_policy not in ('propagate', 'raise', 'omit'):
-        raise ValueError("nan_policy must be 'propagate', 'raise' or 'omit'")
-
-    contains_nan = False
-    for sample in samples:
-        cn = _contains_nan(sample, nan_policy)
-        if cn[0]:
-            contains_nan = True
-            break
-
-    if contains_nan and nan_policy == 'omit':
-        for sample in samples:
-            sample = ma.masked_invalid(sample)
-        return mstats_basic.kruskal(*samples)
-
-    if contains_nan and nan_policy == 'propagate':
-        return KruskalResult(np.nan, np.nan)
 
     alldata = np.concatenate(samples)
     ranked = rankdata(alldata)
@@ -9094,12 +9077,9 @@ def brunnermunzel(x, y, alternative="two-sided", distribution="t",
     0.0057862086661515377
 
     """
-
     nx = len(x)
     ny = len(y)
-    if nx == 0 or ny == 0:
-        NaN = _get_nan(x, y)
-        return BrunnerMunzelResult(NaN, NaN)
+
     rankc = rankdata(np.concatenate((x, y)))
     rankcx = rankc[0:nx]
     rankcy = rankc[nx:nx+ny]
@@ -9130,7 +9110,7 @@ def brunnermunzel(x, y, alternative="two-sided", distribution="t",
                        "(0/0). Try using `distribution='normal'")
             warnings.warn(message, RuntimeWarning, stacklevel=2)
 
-        distribution = distributions.t(df)
+        distribution = _SimpleStudentT(df)
     elif distribution == "normal":
         distribution = _SimpleNormal()
     else:
@@ -9275,9 +9255,9 @@ def combine_pvalues(pvalues, method='fisher', weights=None):
                            symmetric=False, xp=np)
     elif method == 'pearson':
         statistic = 2 * np.sum(np.log1p(-pvalues))
-        # _SimpleChi2 doesn't have `cdf` yet;
-        # add it when `combine_pvalues` is converted to array API
-        pval = distributions.chi2.cdf(-statistic, 2 * len(pvalues))
+        chi2 = _SimpleChi2(2 * len(pvalues))
+        pval = _get_pvalue(-statistic, chi2, alternative='less',
+                           symmetric=False, xp=np)
     elif method == 'mudholkar_george':
         normalizing_factor = np.sqrt(3/len(pvalues))/np.pi
         statistic = -np.sum(np.log(pvalues)) + np.sum(np.log1p(-pvalues))
@@ -9287,7 +9267,9 @@ def combine_pvalues(pvalues, method='fisher', weights=None):
                                   * approx_factor, nu)
     elif method == 'tippett':
         statistic = np.min(pvalues)
-        pval = distributions.beta.cdf(statistic, 1, len(pvalues))
+        beta = _SimpleBeta(1, len(pvalues))
+        pval = _get_pvalue(statistic, beta, alternative='less',
+                           symmetric=False, xp=np)
     elif method == 'stouffer':
         if weights is None:
             weights = np.ones_like(pvalues)
@@ -10691,6 +10673,213 @@ def expectile(a, alpha=0.5, *, weights=None):
     return res.root
 
 
+LinregressResult = _make_tuple_bunch('LinregressResult',
+                                     ['slope', 'intercept', 'rvalue',
+                                      'pvalue', 'stderr'],
+                                     extra_field_names=['intercept_stderr'])
+
+
+def linregress(x, y=None, alternative='two-sided'):
+    """
+    Calculate a linear least-squares regression for two sets of measurements.
+
+    Parameters
+    ----------
+    x, y : array_like
+        Two sets of measurements.  Both arrays should have the same length N.  If
+        only `x` is given (and ``y=None``), then it must be a two-dimensional
+        array where one dimension has length 2.  The two sets of measurements
+        are then found by splitting the array along the length-2 dimension. In
+        the case where ``y=None`` and `x` is a 2xN array, ``linregress(x)`` is
+        equivalent to ``linregress(x[0], x[1])``.
+
+        .. deprecated:: 1.14.0
+            Inference of the two sets of measurements from a single argument `x`
+            is deprecated will result in an error in SciPy 1.16.0; the sets
+            must be specified separately as `x` and `y`.
+    alternative : {'two-sided', 'less', 'greater'}, optional
+        Defines the alternative hypothesis. Default is 'two-sided'.
+        The following options are available:
+
+        * 'two-sided': the slope of the regression line is nonzero
+        * 'less': the slope of the regression line is less than zero
+        * 'greater':  the slope of the regression line is greater than zero
+
+        .. versionadded:: 1.7.0
+
+    Returns
+    -------
+    result : ``LinregressResult`` instance
+        The return value is an object with the following attributes:
+
+        slope : float
+            Slope of the regression line.
+        intercept : float
+            Intercept of the regression line.
+        rvalue : float
+            The Pearson correlation coefficient. The square of ``rvalue``
+            is equal to the coefficient of determination.
+        pvalue : float
+            The p-value for a hypothesis test whose null hypothesis is
+            that the slope is zero, using Wald Test with t-distribution of
+            the test statistic. See `alternative` above for alternative
+            hypotheses.
+        stderr : float
+            Standard error of the estimated slope (gradient), under the
+            assumption of residual normality.
+        intercept_stderr : float
+            Standard error of the estimated intercept, under the assumption
+            of residual normality.
+
+    See Also
+    --------
+    scipy.optimize.curve_fit :
+        Use non-linear least squares to fit a function to data.
+    scipy.optimize.leastsq :
+        Minimize the sum of squares of a set of equations.
+
+    Notes
+    -----
+    For compatibility with older versions of SciPy, the return value acts
+    like a ``namedtuple`` of length 5, with fields ``slope``, ``intercept``,
+    ``rvalue``, ``pvalue`` and ``stderr``, so one can continue to write::
+
+        slope, intercept, r, p, se = linregress(x, y)
+
+    With that style, however, the standard error of the intercept is not
+    available.  To have access to all the computed values, including the
+    standard error of the intercept, use the return value as an object
+    with attributes, e.g.::
+
+        result = linregress(x, y)
+        print(result.intercept, result.intercept_stderr)
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import matplotlib.pyplot as plt
+    >>> from scipy import stats
+    >>> rng = np.random.default_rng()
+
+    Generate some data:
+
+    >>> x = rng.random(10)
+    >>> y = 1.6*x + rng.random(10)
+
+    Perform the linear regression:
+
+    >>> res = stats.linregress(x, y)
+
+    Coefficient of determination (R-squared):
+
+    >>> print(f"R-squared: {res.rvalue**2:.6f}")
+    R-squared: 0.717533
+
+    Plot the data along with the fitted line:
+
+    >>> plt.plot(x, y, 'o', label='original data')
+    >>> plt.plot(x, res.intercept + res.slope*x, 'r', label='fitted line')
+    >>> plt.legend()
+    >>> plt.show()
+
+    Calculate 95% confidence interval on slope and intercept:
+
+    >>> # Two-sided inverse Students t-distribution
+    >>> # p - probability, df - degrees of freedom
+    >>> from scipy.stats import t
+    >>> tinv = lambda p, df: abs(t.ppf(p/2, df))
+
+    >>> ts = tinv(0.05, len(x)-2)
+    >>> print(f"slope (95%): {res.slope:.6f} +/- {ts*res.stderr:.6f}")
+    slope (95%): 1.453392 +/- 0.743465
+    >>> print(f"intercept (95%): {res.intercept:.6f}"
+    ...       f" +/- {ts*res.intercept_stderr:.6f}")
+    intercept (95%): 0.616950 +/- 0.544475
+
+    """
+    TINY = 1.0e-20
+    if y is None:  # x is a (2, N) or (N, 2) shaped array_like
+        message = ('Inference of the two sets of measurements from a single "'
+                   'argument `x` is deprecated will result in an error in "'
+                   'SciPy 1.16.0; the sets must be specified separately as "'
+                   '`x` and `y`.')
+        warnings.warn(message, DeprecationWarning, stacklevel=2)
+        x = np.asarray(x)
+        if x.shape[0] == 2:
+            x, y = x
+        elif x.shape[1] == 2:
+            x, y = x.T
+        else:
+            raise ValueError("If only `x` is given as input, it has to "
+                             "be of shape (2, N) or (N, 2); provided shape "
+                             f"was {x.shape}.")
+    else:
+        x = np.asarray(x)
+        y = np.asarray(y)
+
+    if x.size == 0 or y.size == 0:
+        raise ValueError("Inputs must not be empty.")
+
+    if np.amax(x) == np.amin(x) and len(x) > 1:
+        raise ValueError("Cannot calculate a linear regression "
+                         "if all x values are identical")
+
+    n = len(x)
+    xmean = np.mean(x, None)
+    ymean = np.mean(y, None)
+
+    # Average sums of square differences from the mean
+    #   ssxm = mean( (x-mean(x))^2 )
+    #   ssxym = mean( (x-mean(x)) * (y-mean(y)) )
+    ssxm, ssxym, _, ssym = np.cov(x, y, bias=1).flat
+
+    # R-value
+    #   r = ssxym / sqrt( ssxm * ssym )
+    if ssxm == 0.0 or ssym == 0.0:
+        # If the denominator was going to be 0
+        r = 0.0
+    else:
+        r = ssxym / np.sqrt(ssxm * ssym)
+        # Test for numerical error propagation (make sure -1 < r < 1)
+        if r > 1.0:
+            r = 1.0
+        elif r < -1.0:
+            r = -1.0
+
+    slope = ssxym / ssxm
+    intercept = ymean - slope*xmean
+    if n == 2:
+        # handle case when only two points are passed in
+        if y[0] == y[1]:
+            prob = 1.0
+        else:
+            prob = 0.0
+        slope_stderr = 0.0
+        intercept_stderr = 0.0
+    else:
+        df = n - 2  # Number of degrees of freedom
+        # n-2 degrees of freedom because 2 has been used up
+        # to estimate the mean and standard deviation
+        t = r * np.sqrt(df / ((1.0 - r + TINY)*(1.0 + r + TINY)))
+
+        dist = _SimpleStudentT(df)
+        prob = _get_pvalue(t, dist, alternative, xp=np)
+        prob = prob[()] if prob.ndim == 0 else prob
+
+        slope_stderr = np.sqrt((1 - r**2) * ssym / ssxm / df)
+
+        # Also calculate the standard error of the intercept
+        # The following relationship is used:
+        #   ssxm = mean( (x-mean(x))^2 )
+        #        = ssx - sx*sx
+        #        = mean( x^2 ) - mean(x)^2
+        intercept_stderr = slope_stderr * np.sqrt(ssxm + xmean**2)
+
+    return LinregressResult(slope=slope, intercept=intercept, rvalue=r,
+                            pvalue=prob, stderr=slope_stderr,
+                            intercept_stderr=intercept_stderr)
+
+
 class _SimpleNormal:
     # A very simple, array-API compatible normal distribution for use in
     # hypothesis tests. May be replaced by new infrastructure Normal
@@ -10710,5 +10899,47 @@ class _SimpleChi2:
     def __init__(self, df):
         self.df = df
 
+    def cdf(self, x):
+        return special.chdtr(self.df, x)
+
     def sf(self, x):
         return special.chdtrc(self.df, x)
+
+
+class _SimpleBeta:
+    # A very simple, array-API compatible beta distribution for use in
+    # hypothesis tests. May be replaced by new infrastructure beta
+    # distribution in due time.
+    def __init__(self, a, b, *, loc=None, scale=None):
+        self.a = a
+        self.b = b
+        self.loc = loc
+        self.scale = scale
+
+    def cdf(self, x):
+        if self.loc is not None or self.scale is not None:
+            loc = 0 if self.loc is None else self.loc
+            scale = 1 if self.scale is None else self.scale
+            return special.betainc(self.a, self.b, (x - loc)/scale)
+        return special.betainc(self.a, self.b, x)
+
+    def sf(self, x):
+        if self.loc is not None or self.scale is not None:
+            loc = 0 if self.loc is None else self.loc
+            scale = 1 if self.scale is None else self.scale
+            return special.betaincc(self.a, self.b, (x - loc)/scale)
+        return special.betaincc(self.a, self.b, x)
+
+
+class _SimpleStudentT:
+    # A very simple, array-API compatible t distribution for use in
+    # hypothesis tests. May be replaced by new infrastructure t
+    # distribution in due time.
+    def __init__(self, df):
+        self.df = df
+
+    def cdf(self, t):
+        return special.stdtr(self.df, t)
+
+    def sf(self, t):
+        return special.stdtr(self.df, -t)

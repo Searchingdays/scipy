@@ -125,6 +125,7 @@ def getdtype(dtype, a=None, default=None):
                 raise TypeError("could not interpret data type") from e
     else:
         newdtype = np.dtype(dtype)
+<<<<<<< HEAD
         if newdtype == np.object_:
             raise ValueError(
                 "object dtype is not supported by sparse matrices"
@@ -133,7 +134,14 @@ def getdtype(dtype, a=None, default=None):
     if newdtype not in supported_dtypes:
         raise ValueError("given datatype is not supported")
 
+=======
+>>>>>>> 297b2c8796ef2fc98f5e097cac3dc170436e6442
 
+    if newdtype not in supported_dtypes:
+        supported_dtypes_fmt = ", ".join(t.__name__ for t in supported_dtypes)
+        raise ValueError(f"scipy.sparse does not support dtype {newdtype.name}. "
+                         f"The only supported types are: {supported_dtypes_fmt}.")
+    
     return newdtype
 
 
@@ -393,14 +401,21 @@ def is_pydata_spmatrix(m) -> bool:
 
 
 def convert_pydata_sparse_to_scipy(
-    arg: Any, target_format: Optional[Literal["csc", "csr"]] = None
+    arg: Any,
+    target_format: Optional[Literal["csc", "csr"]] = None,
+    accept_fv: Any = None,
 ) -> Union[Any, "sp.spmatrix"]:
     """
     Convert a pydata/sparse array to scipy sparse matrix,
     pass through anything else.
     """
     if is_pydata_spmatrix(arg):
-        arg = arg.to_scipy_sparse()
+        # The `accept_fv` keyword is new in PyData Sparse 0.15.4 (May 2024),
+        # remove the `except` once the minimum supported version is >=0.15.4
+        try:
+            arg = arg.to_scipy_sparse(accept_fv=accept_fv)
+        except TypeError:
+            arg = arg.to_scipy_sparse()
         if target_format is not None:
             arg = arg.asformat(target_format)
         elif arg.format not in ("csc", "csr"):
